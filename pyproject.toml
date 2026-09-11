@@ -1,0 +1,23 @@
+[project]
+name = "pydata-evals"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.69.0",
+    "arize-phoenix==19.17.0",
+    "arize-phoenix-evals>=3.5.1",
+    "arize-phoenix-otel>=0.17.1",
+    "openinference-instrumentation-anthropic>=0.1.20",
+    "openinference-instrumentation-openai>=0.1.57",
+    "python-dotenv>=1.0.1",
+    "pytest>=9.1.1",
+]
+
+[project.scripts]
+pydata-evals = "pydata_evals.app:main"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
