@@ -1,6 +1,6 @@
 # pydata-evals
 
-A worked example, built for a PyData Lausanne talk, of putting an LLM app behind a
+A worked example, built for a Visium 2026 PyData Lausanne talk, of putting an LLM app behind a
 quality gate that runs in CI.
 
 The app is a Swiss train journey planner: Claude with one tool that queries the
