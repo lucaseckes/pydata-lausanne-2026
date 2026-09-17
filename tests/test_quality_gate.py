@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 from phoenix.client import Client
 
-from pydata_evals.app import answer_question
+from pydata_evals.app import SYSTEM_PROMPT_VERSION, answer_question
 from pydata_evals.evals import (
     DETERMINISTIC_EVALUATORS,
     GATED_EVALUATORS,
@@ -126,7 +126,12 @@ def experiment() -> ExperimentResults:
         dataset=dataset,
         task=run_my_app,
         evaluators=build_evaluators(judge_llm),
-        experiment_name=os.environ.get("EXPERIMENT_NAME", "local"),
+        # Defaulted to the prompt version rather than to "local": three runs
+        # all called "local" are three runs you cannot compare in Phoenix,
+        # which is the only reason to keep the old prompts on disk at all.
+        experiment_name=os.environ.get(
+            "EXPERIMENT_NAME", f"local-{SYSTEM_PROMPT_VERSION}"
+        ),
     )
     return _collect(ran, dataset)
 

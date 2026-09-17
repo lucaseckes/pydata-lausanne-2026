@@ -24,6 +24,8 @@ import anthropic
 from dotenv import load_dotenv
 from phoenix.otel import register
 
+from pydata_evals.prompts import current_prompt
+
 load_dotenv()
 
 # --------------------------------------------------------------------------
@@ -49,9 +51,13 @@ tracer = tracer_provider.get_tracer(__name__)
 
 MODEL = "claude-haiku-4-5"
 
-SYSTEM_PROMPT = """\
-Just respond to the request, invent if you don't find the response
-"""
+# The prompt is versioned in `prompts/`, not inlined here, and the version
+# comes from $APP_SYSTEM_PROMPT (default: the bad one - see prompts/__init__.py
+# for why). Resolved after load_dotenv() so .env can pin it; resolved at import
+# so one process is never two prompts. SYSTEM_PROMPT_VERSION is exported
+# because a score you cannot attribute to a prompt version is not actionable:
+# the gate names its experiment after it.
+SYSTEM_PROMPT_VERSION, SYSTEM_PROMPT = current_prompt()
 
 TOOLS = [
     {
@@ -155,6 +161,7 @@ def answer_question(question: str) -> dict:
 
 
 def main() -> None:
+    print(f"system prompt: {SYSTEM_PROMPT_VERSION}")
     for q in [
         "What's the next train from Lausanne to Zurich HB?",
         "How do I get from Geneva to Bern, and how many transfers?",
