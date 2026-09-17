@@ -27,7 +27,7 @@ import pytest
 from phoenix.client import Client
 
 from pydata_evals.app import answer_question
-from pydata_evals.evals import build_evaluators
+from pydata_evals.evals import GATED_EVALUATORS, build_evaluators
 from pydata_evals.golden_set import THRESHOLDS
 
 DATASET = os.environ.get("EVAL_DATASET", "sbb-journey-golden")
@@ -145,6 +145,12 @@ def test_no_bucket_regresses(experiment):
     by_bucket = defaultdict(list)
 
     for run in experiment.runs:
+        # The deterministic checks run and are recorded, but they do not vote
+        # here: `has_context` is 0.0 for every correct refusal, which would
+        # fail the 100% adversarial floor for behaving correctly. See
+        # GATED_EVALUATORS in evals.py.
+        if run.evaluator not in GATED_EVALUATORS:
+            continue
         by_bucket[run.metadata.get("bucket") or "production"].append(run.score)
 
     failures = []
@@ -172,6 +178,8 @@ def test_no_persona_is_completely_broken(experiment):
     by_persona = defaultdict(list)
 
     for run in experiment.runs:
+        if run.evaluator not in GATED_EVALUATORS:
+            continue
         by_persona[run.metadata.get("persona") or "unknown"].append(run.score)
 
     failures = []
@@ -185,10 +193,18 @@ def test_no_persona_is_completely_broken(experiment):
 
 
 def test_report_failure_modes(experiment):
-    """Not a gate. This is the triage view you actually read when CI is red."""
+    """
+    Not a gate. This is the triage view you actually read when CI is red.
+
+    Gated evaluators only, deliberately: this table is where you go to
+    explain a red bucket, and a rate computed over a different set of
+    evaluators than the bucket floor cannot explain anything.
+    """
     by_mode = defaultdict(list)
 
     for run in experiment.runs:
+        if run.evaluator not in GATED_EVALUATORS:
+            continue
         by_mode[run.metadata.get("failure_mode") or "-"].append(run.score)
 
     for mode, scores in sorted(by_mode.items(), key=lambda kv: _rate(kv[1])):
@@ -218,6 +234,39 @@ def test_report_constraint_adherence_by_kind(experiment):
     for kind in ("none", "hard", "soft", "both"):
         if scores := by_kind.get(kind):
             print(f"  {kind:<8} {_rate(scores):>6.0%}  (n={len(scores)})")
+
+
+def test_report_deterministic_checks(experiment):
+    """
+    Not a gate. The free checks, every one sliced by bucket - because sliced
+    is the only way they read correctly.
+
+    `has_context` at 40% overall means nothing. `has_context` at 0% on
+    adversarial means the app is refusing prompt injections without calling
+    the tool, which is the correct answer; the same 0% on production means
+    retrieval is broken and the judges are about to tell you so at ten
+    thousand times the price. Read the rows, not the total.
+
+    `hard_constraints_satisfiable` is scored only on rows a parser could
+    resolve, so its n is small and is meant to be - the other rows returned
+    no score rather than a free pass.
+    """
+    by_check = defaultdict(lambda: defaultdict(list))
+
+    for run in experiment.runs:
+        if run.evaluator in GATED_EVALUATORS:
+            continue
+        bucket = run.metadata.get("bucket") or "production"
+        by_check[run.evaluator][bucket].append(run.score)
+
+    if not by_check:
+        pytest.skip("no deterministic scores came back")
+
+    for check, by_bucket in sorted(by_check.items()):
+        scored = [s for scores in by_bucket.values() for s in scores]
+        print(f"  {check:<30} {_rate(scored):>6.0%}  (n={len(scored)})")
+        for bucket, scores in sorted(by_bucket.items()):
+            print(f"      {bucket:<20} {_rate(scores):>6.0%}  (n={len(scores)})")
 
 
 def test_report_label_distribution(experiment):

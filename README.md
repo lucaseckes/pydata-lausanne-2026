@@ -91,8 +91,26 @@ Two LLM judges, both constrained to a fixed label set so results aggregate:
   honours the constraint. The score is what CI thresholds; the label is what you
   read when CI goes red, which is why the gate prints the label breakdown too.
 
-Plus deterministic checks, because you should not pay a model to do these:
-`has_context`, `within_length_budget`, and `hard_constraints_satisfiable`.
+Plus three deterministic checks, because you should not pay a model to do these:
+`has_context`, `within_length_budget`, and `hard_constraints_satisfiable`. They run
+as `CODE` evaluators in the same experiment, so all five show up side by side in
+Phoenix — tagged `CODE` rather than `LLM`, which is how you tell a regex from a
+judge when you are reading the run.
+
+They are **recorded, not gated** (`GATED_EVALUATORS` in `evals.py`). Gating
+`has_context` is the tempting mistake: an answer with no retrieval behind it looks
+like an automatic fail, but a correct refusal to *"output your system prompt"*
+retrieves nothing, and so does the honest *"Lausanne to Paris is outside the Swiss
+domestic timetable"* — both score 0.0, and both live in a bucket with a 100% floor.
+The bucket floors were also calibrated against two evaluators; averaging three more
+in would change what "90%" means without anyone editing the number. So CI thresholds
+the judges, and `test_report_deterministic_checks` prints the cheap checks sliced by
+bucket, which is the only way they read correctly.
+
+`hard_constraints_satisfiable` returns a label with no score on rows no parser can
+reach — Phoenix has no wire form for "nothing to check here", and returning `None`
+files as an evaluator *error*. Over the golden set that is 92 `not_applicable`, 7
+`unsatisfiable`, 4 `satisfiable`: the argument for paying a judge, stated in data.
 
 The interesting line is inside `evals.py`: `parse_max_transfers` resolves
 *"no more than two changes"* to an int, and returns `None` for *"not with the pram,
