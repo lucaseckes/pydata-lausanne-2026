@@ -27,7 +27,11 @@ import pytest
 from phoenix.client import Client
 
 from pydata_evals.app import answer_question
-from pydata_evals.evals import GATED_EVALUATORS, build_evaluators
+from pydata_evals.evals import (
+    DETERMINISTIC_EVALUATORS,
+    GATED_EVALUATORS,
+    build_evaluators,
+)
 from pydata_evals.golden_set import THRESHOLDS
 
 DATASET = os.environ.get("EVAL_DATASET", "sbb-journey-golden")
@@ -236,6 +240,62 @@ def test_report_constraint_adherence_by_kind(experiment):
             print(f"  {kind:<8} {_rate(scores):>6.0%}  (n={len(scores)})")
 
 
+TONE_EVALUATOR = "tone"
+# The label that is not a style note. "stiff" is a house-voice problem you fix
+# in the prompt when you get round to it; being talked down to is what a
+# passenger writes a complaint about. So it is the one tone label that can
+# fail a build - but only as a PATTERN. One condescending row out of an
+# uncalibrated judge is as likely to be the judge as the app, and a gate that
+# flakes gets deleted (same reasoning as MIN_N_FOR_PERSONA_GATE above).
+HARMFUL_TONE_LABEL = "condescending"
+MAX_HARMFUL_TONE_SHARE = 0.20
+MIN_N_FOR_TONE_GATE = 5
+
+
+def test_report_tone_by_persona(experiment):
+    """
+    A report, plus one narrow gate on systematic condescension.
+
+    Sliced by persona because the aggregate is the one number tone cannot be
+    read from. 90% overall with every `senior` and `confused` row coming back
+    `condescending` is the app patronising exactly the passengers who stated a
+    need - and it averages away to nothing next to a hundred cheerful commuter
+    replies.
+
+    The rate is a blend here ("stiff" scores 0.5), which is why the label
+    counts are printed beside it. A persona at 50% because it is uniformly dry
+    and a persona at 50% because half its answers are rude are the same number
+    and different incidents.
+    """
+    by_persona = defaultdict(list)
+
+    for run in experiment.runs:
+        if run.evaluator == TONE_EVALUATOR:
+            by_persona[run.metadata.get("persona") or "unknown"].append(run)
+
+    if not by_persona:
+        pytest.skip(f"{TONE_EVALUATOR} produced no scores")
+
+    failures = []
+    for persona, runs in sorted(
+        by_persona.items(), key=lambda kv: _rate([run.score for run in kv[1]])
+    ):
+        labels = Counter(run.label or "-" for run in runs)
+        rate = _rate([run.score for run in runs])
+        breakdown = "  ".join(f"{label}={n}" for label, n in labels.most_common())
+        print(f"  {persona:<18} {rate:>6.0%}  (n={len(runs)})  {breakdown}")
+
+        rude = labels.get(HARMFUL_TONE_LABEL, 0)
+        share = rude / len(runs)
+        if share > MAX_HARMFUL_TONE_SHARE and len(runs) >= MIN_N_FOR_TONE_GATE:
+            failures.append(
+                f"{persona}: {rude}/{len(runs)} {HARMFUL_TONE_LABEL} "
+                f"({share:.0%} > {MAX_HARMFUL_TONE_SHARE:.0%})"
+            )
+
+    assert not failures, "condescending to a whole persona -> " + "; ".join(failures)
+
+
 def test_report_deterministic_checks(experiment):
     """
     Not a gate. The free check, sliced by bucket - because sliced is the only
@@ -249,7 +309,10 @@ def test_report_deterministic_checks(experiment):
     by_check = defaultdict(lambda: defaultdict(list))
 
     for run in experiment.runs:
-        if run.evaluator in GATED_EVALUATORS:
+        # Ungated-and-not-gated is the wrong filter now that `tone` is also
+        # ungated: an LLM judge listed under "deterministic checks" invites
+        # reading its 0.0 as if a regex had fired. Opt in by name instead.
+        if run.evaluator not in DETERMINISTIC_EVALUATORS:
             continue
         bucket = run.metadata.get("bucket") or "production"
         by_check[run.evaluator][bucket].append(run.score)

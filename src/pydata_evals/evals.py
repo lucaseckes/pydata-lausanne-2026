@@ -18,108 +18,46 @@ from phoenix.client.experiments import create_evaluator
 from phoenix.evals import ClassificationEvaluator
 
 from pydata_evals.golden_set import GOLDEN_EXAMPLES as GOLDEN_SET
+from pydata_evals.rubrics import (
+    CONSTRAINT_RUBRIC,
+    GROUNDEDNESS_RUBRIC,
+    TONE_RUBRIC,
+)
 
 # --------------------------------------------------------------------------
-# The rubric. Note that it names the boundary cases explicitly — that is the
-# difference between a judge that agrees with humans and one that does not.
-# --------------------------------------------------------------------------
-GROUNDEDNESS_RUBRIC = """
-You are grading whether an ANSWER about a train journey is supported by the
-CONTEXT provided. CONTEXT is a list of real connections returned by the SBB
-timetable API (transport.opendata.ch).
-
-CONTEXT:
-{context}
-
-QUESTION:
-{input}
-
-ANSWER:
-{output}
-
-Label "grounded" only if every factual claim in the ANSWER can be traced to
-the CONTEXT. Label "unsupported" if the ANSWER adds any specific fact — a
-departure or arrival time, a platform, a duration, a transfer count, a
-station — that does not appear in the CONTEXT, even if that fact is
-plausible or generally true.
-
-Boundary cases:
-- An answer that correctly says the route is not covered (e.g. no rail
-  connection exists, or the query is cross-border and outside the Swiss
-  domestic timetable) is "grounded", as long as CONTEXT is empty.
-- An answer that is factually right about the world but absent from the
-  CONTEXT is "unsupported". We are grading retrieval, not trivia.
-- Paraphrase is fine. Added specificity (a time or platform not in CONTEXT)
-  is not.
-
-Respond with exactly one word: grounded or unsupported.
-"""
-
-
-# --------------------------------------------------------------------------
-# The second rubric. Groundedness asks "is this true?". This one asks the
-# other half of the question users actually care about: "is this what I
-# ASKED FOR?" An answer can be perfectly grounded in the timetable and still
-# ignore the one thing the user said mattered.
+# The rubrics live one-per-file in `rubrics/`, because a rubric is a prompt
+# and not code: the boundary cases are the thing people argue about, and they
+# should be editable and reviewable as prose rather than as a re-indented
+# string literal. What stays here is the wiring - the label set, the score
+# each label earns, and the field bindings - with the reasons those choices
+# were made, which is what the comments below are for.
 #
-# The hard part is that constraints are rarely written as requirements. They
-# are buried in prose, in an aside, in the reason someone gives for asking.
-# See `parse_max_transfers` below for where code stops being able to help.
+#   rubrics/groundedness.md          "is this true?"
+#   rubrics/constraint_adherence.md  "is this what I ASKED FOR?" An answer can
+#                                    be perfectly grounded in the timetable and
+#                                    still ignore the one thing the user said
+#                                    mattered. The hard part is that
+#                                    constraints are rarely phrased as
+#                                    requirements - see `parse_max_transfers`
+#                                    below for where code stops being able to
+#                                    help.
+#   rubrics/tone.md                  "does this sound like it came from someone
+#                                    who works here?" The users are paying
+#                                    passengers, often stressed and on a
+#                                    platform. Both failure directions are real
+#                                    and they are not symmetric: slang and
+#                                    emoji are embarrassing, but condescension
+#                                    loses the customer, and it lands hardest
+#                                    on exactly the personas least able to
+#                                    shrug it off (see `senior` and `confused`
+#                                    in golden_set.py).
+#
+# All three name their boundary cases explicitly - that is the difference
+# between a judge that agrees with humans and one that does not - and each one
+# is careful to stay in its lane. A fabricated answer delivered warmly is
+# "on_tone" AND "unsupported"; an answer in the wrong language is a constraint
+# failure, not a tone failure. Each judge does one job.
 # --------------------------------------------------------------------------
-CONSTRAINT_RUBRIC = """
-You are grading whether an ANSWER honoured the constraints the user put in
-their QUESTION about a Swiss train journey.
-
-A constraint is anything that narrows what an acceptable answer looks like:
-a limit ("no more than two changes"), a deadline ("before 09:00", "before the
-kids' nap"), a preference ("somewhere scenic", "quiet coach"), a scope ("just
-the times, no commentary"), a count ("give me three options"), a language, or
-a format.
-
-Constraints are often not phrased as requirements. Read for intent, not
-keywords:
-- "I'd rather not drag the pram across Bern twice" is a transfer limit.
-- "We land at 14:10 and I promised her a lake before dinner" is two deadlines.
-- "My mother is coming, she is 84" is a step-free / few-transfers constraint.
-
-CONTEXT (what the retrieval tool actually returned):
-{context}
-
-QUESTION:
-{input}
-
-ANSWER:
-{output}
-
-Label:
-- "honoured"      every constraint you identified is satisfied by the ANSWER.
-- "flagged"       at least one constraint cannot be satisfied from the
-                  CONTEXT, and the ANSWER says so plainly. "None of the
-                  connections I found arrive before 09:00" HONOURS the
-                  constraint - it does not fail it.
-- "violated"      a constraint is contradicted, or silently dropped. Silent
-                  dropping is the common one: the user asked for a direct
-                  train and got a cheerful answer about a two-change
-                  connection with no mention that it is not direct.
-- "no_constraint" the QUESTION carries nothing beyond the route itself.
-
-Boundary cases:
-- Grade adherence, not truth. An ANSWER that invents a connection which
-  happens to satisfy the constraint is "honoured" here and "unsupported" for
-  the groundedness judge. Do not do that judge's job.
-- A constraint the tool cannot answer at all (price, platform, step-free
-  access, "most scenic") is honoured by saying it is not available:
-  "flagged". Answering it anyway is "violated".
-- Extra helpful detail is not a violation unless the user asked for brevity
-  or asked for one specific thing only.
-- Asked for N, given fewer with no explanation: "violated". Fewer with an
-  explanation: "flagged".
-- A refusal to a request that is out of scope (booking, leaking the system
-  prompt) is "honoured" - the user's framing is not a constraint you must
-  obey.
-
-Respond with exactly one word: honoured, flagged, violated, or no_constraint.
-"""
 
 
 def build_evaluators(judge_llm):
@@ -176,11 +114,45 @@ def build_evaluators(judge_llm):
         }
     )
 
-    # The judges are two of three. The deterministic check is appended by
+    tone = ClassificationEvaluator(
+        name="tone",
+        prompt_template=TONE_RUBRIC,
+        llm=judge_llm,
+        # "stiff" gets partial credit on purpose. A cold-but-correct answer is
+        # a warmth miss, not a customer-service incident, so scoring it 0.0
+        # alongside condescension would make the rate unreadable - a run full
+        # of dry timetable dumps would look identical to one that insults
+        # passengers. It is not 1.0 either, because a fleet of form letters is
+        # precisely what this judge exists to notice. Read the label
+        # breakdown, not the rate: this is the one evaluator here whose score
+        # is a blend rather than a count.
+        choices={
+            "on_tone": 1.0,
+            "stiff": 0.5,
+            "too_casual": 0.0,
+            "condescending": 0.0,
+        },
+    )
+    # No {context} in this rubric - tone is judged from what the passenger
+    # sees, and handing the judge the timetable only invites it to start
+    # grading accuracy. Bind only what the template asks for.
+    tone.bind(
+        {
+            "input": "input.input",
+            "output": "output.answer",
+        }
+    )
+
+    # The judges are three of four. The deterministic check is appended by
     # `build_deterministic_evaluators` so it is RECORDED in Phoenix next to
     # the judges; `GATED_EVALUATORS` is what decides which of them CI may fail
     # a build on, and it is deliberately not all of them.
-    return [groundedness, constraint_adherence, *build_deterministic_evaluators()]
+    return [
+        groundedness,
+        constraint_adherence,
+        tone,
+        *build_deterministic_evaluators(),
+    ]
 
 
 def within_length_budget(output) -> float:
@@ -304,9 +276,32 @@ def build_deterministic_evaluators():
 # silently changes what "90%" means, without anyone editing the number. A
 # threshold whose meaning drifts under you is not a threshold.
 #
-# So: three evaluators run, three show up in Phoenix, two can fail CI.
+# The same argument keeps `tone` out of the gate, for a reason worth saying
+# out loud: it is a judge, it is semantic, and it is still not correctness. A
+# stiff answer with the right times gets the passenger on the train; folding
+# it into the bucket average would let a warm, fabricated answer offset a cold
+# accurate one, and the adversarial bucket's 100% floor would start failing on
+# register. Tone is also the evaluator most likely to drift when someone edits
+# the system prompt for other reasons, which is a trend line you read, not a
+# build you block.
+#
+# That is an argument against averaging it into the bucket floors, not against
+# ever failing on it. One tone failure does real damage - a whole persona
+# getting talked down to - so `test_report_tone_by_persona` gates on that ONE
+# label, as a share, with an n-floor under it. A floor of its own, calibrated
+# for the harm it names. Give the other labels one too, once you have hand
+# labels to calibrate against.
+#
+# So: four evaluators run, four show up in Phoenix, two can fail CI.
 # --------------------------------------------------------------------------
 GATED_EVALUATORS = frozenset({"groundedness", "constraint_adherence"})
+
+# Ungated is not the same as cheap, and the reports below need to tell them
+# apart: `tone` costs a model call per example and can be wrong in the ways
+# judges are wrong, while `within_length_budget` is a `len()`. Printing them in
+# one table would invite reading a judge's 0.0 like a regex's. Named here so
+# the split lives next to GATED_EVALUATORS rather than in the test module.
+DETERMINISTIC_EVALUATORS = frozenset({"within_length_budget"})
 
 
 # --------------------------------------------------------------------------
