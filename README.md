@@ -5,8 +5,9 @@ quality gate that runs in CI.
 
 The app is a Swiss train journey planner: Claude with one tool that queries the
 public SBB timetable ([transport.opendata.ch](http://transport.opendata.ch)).
-It is deliberately weak — its system prompt literally says *"invent if you don't
-find the response"* — so the evals have something real to catch.
+It ships deliberately weak — the default system prompt literally says *"invent if
+you don't find the response"* — so the evals have something real to catch. Two
+better prompts sit next to it in `prompts/`, so you can watch the gate move.
 
 Everything is traced to [Arize Phoenix](https://github.com/Arize-ai/phoenix), graded
 by two LLM judges plus one deterministic check, and asserted with plain `pytest`.
@@ -15,7 +16,7 @@ by two LLM judges plus one deterministic check, and asserted with plain `pytest`
 
 | Step | File | What it does |
 | --- | --- | --- |
-| 1. Instrument | `src/pydata_evals/app.py` | The app, traced from the first line. You cannot build a golden set from failures you never recorded. |
+| 1. Instrument | `src/pydata_evals/app.py` + `prompts/` | The app, traced from the first line, running one of three versioned system prompts. You cannot build a golden set from failures you never recorded. |
 | 2. Judge + fixture | `src/pydata_evals/evals.py` + `rubrics/` | Three rubrics written from observed failures — one `.md` file each — one deterministic check for what doesn't need a model, and the dataset seeder. |
 | 3. Gate | `tests/test_quality_gate.py` | Runs the experiment and asserts per-bucket floors. Red build names the bucket and the failure mode. |
 
@@ -76,6 +77,48 @@ uv run python -m pydata_evals.evals --sync
 
 Patching cannot create or delete rows; added and removed ids are reported loudly
 rather than drifting silently.
+
+## The three system prompts
+
+The app's prompt is versioned in `src/pydata_evals/prompts/`, one `.md` per
+version, same argument as the rubrics: a prompt is prose, so it should diff as
+prose. The difference is what the diff is *for*. Editing a rubric changes what
+"good" means and invalidates your baseline; editing a system prompt changes the
+product, which is the thing the baseline exists to measure — and that only works
+if the old version is still on disk, still runnable, and still named.
+
+| version | what it is | what the judges see |
+| --- | --- | --- |
+| `v1_bad` | one line, ending in *"invent if you don't find the response"* | `groundedness` fails broadly — the model was told in writing to fabricate. Nothing about constraints or register, so the other two measure whatever the model happens to do. |
+| `v2_mid` | the ten-minute fix after a red build | Removes the licence to invent, so simple routes come good and the groundedness rate jumps. It still asks for platform, price and step-free access — none of which the tool returns — so the highest-harm hallucinations survive the fix that looked like it worked. Says nothing about naming a constraint it cannot meet, so `constraint_adherence` keeps scoring `violated` on silent drops. And it asks for enthusiasm, emoji and the basics explained back, which pushes `tone` toward `too_casual` and `condescending`. |
+| `v3_good` | written against the failures the first two produce | The six fields the tool actually returns and a refusal to go past them; constraints read for intent and named when they cannot be met; refusals that decline without lecturing; the register misses spelled out. |
+
+Select one with `APP_SYSTEM_PROMPT` (default `v1_bad` — a default that quietly
+shipped the good prompt would leave the first run of the demo green and
+pointless):
+
+```bash
+uv run python -m pydata_evals.prompts                      # print all three
+APP_SYSTEM_PROMPT=v3_good uv run pydata-evals              # run the app on one
+
+for v in v1_bad v2_mid v3_good; do
+  APP_SYSTEM_PROMPT=$v uv run pytest tests/test_quality_gate.py -s
+done
+```
+
+The experiment name defaults to `local-<version>` rather than `local`, because
+three runs all called `local` are three runs you cannot compare in Phoenix.
+
+`v2_mid` is the version worth putting on a slide. It is a real improvement on the
+metric someone was looking at and a regression on two they weren't — a tone
+regression introduced by a prompt edit made for entirely unrelated reasons, which
+is the argument for running an ungated judge on a trend line.
+
+One caveat, because it is the standard way a demo like this lies: `v3_good` and the
+rubrics were written from the same observed failures, so parts of it read like the
+rubric grading it. That inflates the score. Treat a jump on this golden set as a
+hypothesis and re-check it on rows the prompt author never saw — the judges are
+calibrated against hand labels, the prompt is not.
 
 ## The evaluators
 
@@ -186,6 +229,10 @@ answer is to say so. Those rows catch a model happily inventing "platform 7".
 ```
 src/pydata_evals/
   app.py          instrumented journey planner (claude-haiku-4-5 + SBB timetable tool)
+  prompts/        one app system prompt per version, selected by $APP_SYSTEM_PROMPT
+    v1_bad.md
+    v2_mid.md
+    v3_good.md
   evals.py        evaluator wiring, the length check, constraint parsers, dataset seed/sync
   rubrics/        one judge prompt per file
     groundedness.md
