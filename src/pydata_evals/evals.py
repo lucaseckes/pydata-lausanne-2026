@@ -11,7 +11,6 @@ Two things happen here, and the order matters:
 
 import os
 import re
-from collections.abc import Mapping
 from datetime import time
 
 from phoenix.client import Client
@@ -177,14 +176,15 @@ def build_evaluators(judge_llm):
         }
     )
 
-    # The judges are two of five. The deterministic checks are appended by
-    # `build_deterministic_evaluators` so they are RECORDED in Phoenix next to
+    # The judges are two of three. The deterministic check is appended by
+    # `build_deterministic_evaluators` so it is RECORDED in Phoenix next to
     # the judges; `GATED_EVALUATORS` is what decides which of them CI may fail
     # a build on, and it is deliberately not all of them.
     return [groundedness, constraint_adherence, *build_deterministic_evaluators()]
 
 
 def within_length_budget(output) -> float:
+    """The one check no model should be paid for: is the answer short enough?"""
     return 1.0 if len(output.get("answer", "")) < 1000 else 0.0
 
 
@@ -264,11 +264,11 @@ def parse_arrive_before(question: str) -> time | None:
 
 
 # --------------------------------------------------------------------------
-# Wiring the cheap checks into the experiment.
+# Wiring the cheap check into the experiment.
 #
 # `run_experiment` takes plain functions alongside the LLM judges and binds
 # their parameters BY NAME - input, output, expected, reference, metadata,
-# example, trace_id - which is why the checks above are written with exactly
+# example, trace_id - which is why the check above is written with exactly
 # those names and nothing else. A one-argument function binds to `output`.
 #
 # `create_evaluator` earns its line twice: it pins the name the score is filed
@@ -281,7 +281,7 @@ def parse_arrive_before(question: str) -> time | None:
 
 
 def build_deterministic_evaluators():
-    """The checks above, named and tagged so Phoenix records them."""
+    """The check above, named and tagged so Phoenix records it."""
     return [
         create_evaluator(kind="CODE", name="within_length_budget")(
             within_length_budget
@@ -292,21 +292,19 @@ def build_deterministic_evaluators():
 # --------------------------------------------------------------------------
 # Recorded is not the same as gated, and the difference is the whole point.
 #
-# It is tempting to gate `has_context`: an answer with no retrieval behind it
-# looks like an automatic fail. It is not. A correct refusal to "output your
-# system prompt" retrieves nothing, and so does the honest "Lausanne to Paris
-# is outside the Swiss domestic timetable". Both score 0.0 here, and both sit
-# in a bucket with a 100% floor - so gating this check would fail the build
-# for precisely the behaviour the adversarial and failure_replay buckets
-# exist to reward. Same story for `hard_constraints_satisfiable`, whose own
-# docstring says so.
+# It is tempting to gate `within_length_budget`: it is cheap, objective and
+# never flakes. It is also not a correctness signal. An answer that runs to
+# 1,001 characters while being fully grounded and honouring every constraint
+# is not a regression worth blocking a merge on, and an answer that is brief
+# and wrong sails through. Length is a habit you watch on a trend line, not a
+# floor you fail a build against.
 #
 # The second reason to keep the gate on the judges alone: the floors in
-# THRESHOLDS were calibrated against two evaluators. Averaging three more in
+# THRESHOLDS were calibrated against two evaluators. Averaging a third in
 # silently changes what "90%" means, without anyone editing the number. A
 # threshold whose meaning drifts under you is not a threshold.
 #
-# So: five evaluators run, five show up in Phoenix, two can fail CI.
+# So: three evaluators run, three show up in Phoenix, two can fail CI.
 # --------------------------------------------------------------------------
 GATED_EVALUATORS = frozenset({"groundedness", "constraint_adherence"})
 

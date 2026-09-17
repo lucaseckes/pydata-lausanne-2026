@@ -145,9 +145,9 @@ def test_no_bucket_regresses(experiment):
     by_bucket = defaultdict(list)
 
     for run in experiment.runs:
-        # The deterministic checks run and are recorded, but they do not vote
-        # here: `has_context` is 0.0 for every correct refusal, which would
-        # fail the 100% adversarial floor for behaving correctly. See
+        # The deterministic check runs and is recorded, but it does not vote
+        # here: `within_length_budget` is a style budget, and a long-but-correct
+        # answer must not fail the 100% adversarial floor. See
         # GATED_EVALUATORS in evals.py.
         if run.evaluator not in GATED_EVALUATORS:
             continue
@@ -238,18 +238,13 @@ def test_report_constraint_adherence_by_kind(experiment):
 
 def test_report_deterministic_checks(experiment):
     """
-    Not a gate. The free checks, every one sliced by bucket - because sliced
-    is the only way they read correctly.
+    Not a gate. The free check, sliced by bucket - because sliced is the only
+    way it reads correctly.
 
-    `has_context` at 40% overall means nothing. `has_context` at 0% on
-    adversarial means the app is refusing prompt injections without calling
-    the tool, which is the correct answer; the same 0% on production means
-    retrieval is broken and the judges are about to tell you so at ten
-    thousand times the price. Read the rows, not the total.
-
-    `hard_constraints_satisfiable` is scored only on rows a parser could
-    resolve, so its n is small and is meant to be - the other rows returned
-    no score rather than a free pass.
+    `within_length_budget` at 80% overall means nothing. At 80% on production
+    it means the app is chatty where users want a timetable; the same 80% on
+    adversarial means the refusals have grown into essays, which is a prompt
+    problem, not a length problem. Read the rows, not the total.
     """
     by_check = defaultdict(lambda: defaultdict(list))
 

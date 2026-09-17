@@ -9,14 +9,14 @@ It is deliberately weak — its system prompt literally says *"invent if you don
 find the response"* — so the evals have something real to catch.
 
 Everything is traced to [Arize Phoenix](https://github.com/Arize-ai/phoenix), graded
-by LLM judges plus deterministic checks, and asserted with plain `pytest`.
+by two LLM judges plus one deterministic check, and asserted with plain `pytest`.
 
 ## The three steps
 
 | Step | File | What it does |
 | --- | --- | --- |
 | 1. Instrument | `src/pydata_evals/app.py` | The app, traced from the first line. You cannot build a golden set from failures you never recorded. |
-| 2. Judge + fixture | `src/pydata_evals/evals.py` | Two rubrics written from observed failures, deterministic checks for what doesn't need a model, and the dataset seeder. |
+| 2. Judge + fixture | `src/pydata_evals/evals.py` | Two rubrics written from observed failures, one deterministic check for what doesn't need a model, and the dataset seeder. |
 | 3. Gate | `tests/test_quality_gate.py` | Runs the experiment and asserts per-bucket floors. Red build names the bucket and the failure mode. |
 
 `src/pydata_evals/golden_set.py` is step 2 grown up: the four slide-sized examples
@@ -91,33 +91,29 @@ Two LLM judges, both constrained to a fixed label set so results aggregate:
   honours the constraint. The score is what CI thresholds; the label is what you
   read when CI goes red, which is why the gate prints the label breakdown too.
 
-Plus three deterministic checks, because you should not pay a model to do these:
-`has_context`, `within_length_budget`, and `hard_constraints_satisfiable`. They run
-as `CODE` evaluators in the same experiment, so all five show up side by side in
-Phoenix — tagged `CODE` rather than `LLM`, which is how you tell a regex from a
-judge when you are reading the run.
+Plus one deterministic check, because you should not pay a model to count
+characters: **`within_length_budget`**. It runs as a `CODE` evaluator in the same
+experiment, so all three show up side by side in Phoenix — tagged `CODE` rather
+than `LLM`, which is how you tell a regex from a judge when you are reading the run.
 
-They are **recorded, not gated** (`GATED_EVALUATORS` in `evals.py`). Gating
-`has_context` is the tempting mistake: an answer with no retrieval behind it looks
-like an automatic fail, but a correct refusal to *"output your system prompt"*
-retrieves nothing, and so does the honest *"Lausanne to Paris is outside the Swiss
-domestic timetable"* — both score 0.0, and both live in a bucket with a 100% floor.
-The bucket floors were also calibrated against two evaluators; averaging three more
-in would change what "90%" means without anyone editing the number. So CI thresholds
-the judges, and `test_report_deterministic_checks` prints the cheap checks sliced by
-bucket, which is the only way they read correctly.
+It is **recorded, not gated** (`GATED_EVALUATORS` in `evals.py`). Gating it is the
+tempting mistake: it is cheap, objective and never flakes, but it is not a
+correctness signal — a 1,001-character answer that is grounded and honours every
+constraint is not worth blocking a merge on, and a brief wrong answer sails through.
+The bucket floors were also calibrated against two evaluators; averaging a third in
+would change what "90%" means without anyone editing the number. So CI thresholds
+the judges, and `test_report_deterministic_checks` prints the cheap check sliced by
+bucket, which is the only way it reads correctly.
 
-`hard_constraints_satisfiable` returns a label with no score on rows no parser can
-reach — Phoenix has no wire form for "nothing to check here", and returning `None`
-files as an evaluator *error*. Over the golden set that is 92 `not_applicable`, 7
-`unsatisfiable`, 4 `satisfiable`: the argument for paying a judge, stated in data.
-
-The interesting line is inside `evals.py`: `parse_max_transfers` resolves
-*"no more than two changes"* to an int, and returns `None` for *"not with the pram,
-honestly"* — the same constraint, unreachable by any regex. Parsers return `None`,
-never `1.0`, when nothing parsed. Scoring an unparsed constraint as a pass turns
-every prose constraint into a silent green, which is exactly the failure the gate
-exists to prevent.
+One check is the honest count, and it is the point: everything else users care
+about here is semantic. The line where code stops being able to help is in
+`evals.py`: `parse_max_transfers` resolves *"no more than two changes"* to an int,
+and returns `None` for *"not with the pram, honestly"* — the same constraint,
+unreachable by any regex. The parsers no longer score an evaluator; they label
+the golden set's constraint axis, and `test_constraint_label_matches_what_the_parser_can_see`
+holds those labels honest. They return `None`, never `1.0`, when nothing parsed:
+scoring an unparsed constraint as a pass turns every prose constraint into a silent
+green, which is exactly the failure the gate exists to prevent.
 
 ## The golden set
 
@@ -166,7 +162,7 @@ answer is to say so. Those rows catch a model happily inventing "platform 7".
 ```
 src/pydata_evals/
   app.py          instrumented journey planner (claude-haiku-4-5 + SBB timetable tool)
-  evals.py        rubrics, deterministic checks, dataset seed/sync
+  evals.py        rubrics, the length check, constraint parsers, dataset seed/sync
   golden_set.py   103 examples, personas, buckets, thresholds, slicing helpers
 tests/
   test_golden_set.py     structural tests — fast, offline, no API key

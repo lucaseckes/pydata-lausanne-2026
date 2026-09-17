@@ -94,7 +94,7 @@ def test_most_rows_actually_constrain_something():
 def test_the_semantic_half_is_the_big_half():
     """
     The reason we pay for an LLM judge at all. If most constraints were
-    parseable, `hard_constraints_satisfiable` would be the whole story and
+    parseable, `parse_max_transfers` and friends would be the whole story and
     the judge would be an expensive way to agree with a regex.
     """
     assert len(needs_a_judge()) >= 2 * len(by_constraint("hard"))
