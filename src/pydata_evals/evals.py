@@ -11,10 +11,10 @@ Two things happen here, and the order matters:
 
 import os
 import re
-from collections.abc import Mapping
 from datetime import time
 
 from phoenix.client import Client
+from phoenix.client.experiments import create_evaluator
 from phoenix.evals import ClassificationEvaluator
 
 from pydata_evals.golden_set import GOLDEN_EXAMPLES as GOLDEN_SET
@@ -176,19 +176,16 @@ def build_evaluators(judge_llm):
         }
     )
 
-    return [groundedness, constraint_adherence]
-
-
-# --------------------------------------------------------------------------
-# Deterministic checks. Do NOT pay a model to do these.
-# --------------------------------------------------------------------------
-def has_context(output) -> float:
-    """Answered without retrieving anything = automatic fail, no LLM needed."""
-    return 1.0 if output.get("context") else 0.0
+    # The judges are two of three. The deterministic check is appended by
+    # `build_deterministic_evaluators` so it is RECORDED in Phoenix next to
+    # the judges; `GATED_EVALUATORS` is what decides which of them CI may fail
+    # a build on, and it is deliberately not all of them.
+    return [groundedness, constraint_adherence, *build_deterministic_evaluators()]
 
 
 def within_length_budget(output) -> float:
-    return 1.0 if len(output.get("answer", "")) < 1200 else 0.0
+    """The one check no model should be paid for: is the answer short enough?"""
+    return 1.0 if len(output.get("answer", "")) < 1000 else 0.0
 
 
 # --------------------------------------------------------------------------
@@ -265,44 +262,51 @@ def parse_arrive_before(question: str) -> time | None:
     return None
 
 
-def _arrival(connection: Mapping) -> time | None:
-    # "2026-09-04T08:12:00+0200" -> time(8, 12)
-    if match := re.search(r"T(\d{2}):(\d{2})", str(connection.get("arrival", ""))):
-        return time(int(match.group(1)), int(match.group(2)))
-    return None
+
+# --------------------------------------------------------------------------
+# Wiring the cheap check into the experiment.
+#
+# `run_experiment` takes plain functions alongside the LLM judges and binds
+# their parameters BY NAME - input, output, expected, reference, metadata,
+# example, trace_id - which is why the check above is written with exactly
+# those names and nothing else. A one-argument function binds to `output`.
+#
+# `create_evaluator` earns its line twice: it pins the name the score is filed
+# under (otherwise you get whatever `__qualname__` happens to be, and renaming
+# a function silently orphans its history), and it tags the annotation CODE
+# rather than LLM - which is how you tell a regex from a judge in the Phoenix
+# UI, and the reason a 0.0 from one is read differently from a 0.0 from the
+# other.
+# --------------------------------------------------------------------------
 
 
-def hard_constraints_satisfiable(input, output) -> float | None:
-    """
-    A PRECONDITION check, not the constraint itself. It answers the narrow,
-    cheap, sound question: did retrieval return anything that COULD satisfy
-    the machine-readable constraints in the question?
+def build_deterministic_evaluators():
+    """The check above, named and tagged so Phoenix records it."""
+    return [
+        create_evaluator(kind="CODE", name="within_length_budget")(
+            within_length_budget
+        ),
+    ]
 
-    Deliberately not in `build_evaluators`. A 0.0 here is not an app bug - it
-    means the timetable had nothing to offer, and the only correct answer is
-    the one CONSTRAINT_RUBRIC labels "flagged". Gating on it would fail the
-    build for telling the truth. Use it to route triage: rows that are 0.0
-    here and "violated" there are the app inventing a connection to please
-    the user, which is the failure this pair was built to catch.
 
-    Returns None when nothing parsed, so unconstrained rows are skipped
-    rather than scored as passes.
-    """
-    question = input["input"] if isinstance(input, Mapping) else str(input)
-    limit = parse_max_transfers(question)
-    deadline = parse_arrive_before(question)
-    if limit is None and deadline is None:
-        return None
-
-    for connection in output.get("context") or []:
-        if limit is not None and (connection.get("transfers") or 0) > limit:
-            continue
-        if deadline is not None:
-            arrival = _arrival(connection)
-            if arrival is None or arrival >= deadline:
-                continue
-        return 1.0
-    return 0.0
+# --------------------------------------------------------------------------
+# Recorded is not the same as gated, and the difference is the whole point.
+#
+# It is tempting to gate `within_length_budget`: it is cheap, objective and
+# never flakes. It is also not a correctness signal. An answer that runs to
+# 1,001 characters while being fully grounded and honouring every constraint
+# is not a regression worth blocking a merge on, and an answer that is brief
+# and wrong sails through. Length is a habit you watch on a trend line, not a
+# floor you fail a build against.
+#
+# The second reason to keep the gate on the judges alone: the floors in
+# THRESHOLDS were calibrated against two evaluators. Averaging a third in
+# silently changes what "90%" means, without anyone editing the number. A
+# threshold whose meaning drifts under you is not a threshold.
+#
+# So: three evaluators run, three show up in Phoenix, two can fail CI.
+# --------------------------------------------------------------------------
+GATED_EVALUATORS = frozenset({"groundedness", "constraint_adherence"})
 
 
 # --------------------------------------------------------------------------
